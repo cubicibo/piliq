@@ -73,12 +73,12 @@ class RGBA:
 class PILIQ:
     _lib = None
     def __init__(self) -> None:
-        assert __class__._lib is not None, "Library must be loaded in the class before instantiating objects."
+        assert self._lib is not None, "Library must be loaded in the class before instantiating objects."
         self._attr = self._lib.liq_attr_create()
         _logger.debug("Created liq attr handle.")
 
     def __del__(self) -> None:
-        if self._attr:
+        if self._attr is not None:
             self._lib.liq_attr_destroy(self._attr)
             _logger.debug("Destroyed liq attr handle.")
 
@@ -109,6 +109,10 @@ class PILIQ:
 
     @__ensure_liq
     def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+        if self._attr is None:
+            _logger.error("Using a destroyed libimagequant instance, aborting.")
+            return None, None
+
         assert img.mode == 'RGBA'
         assert 0 < colors <= 256
         self._lib.liq_set_max_colors(self._attr, colors)
@@ -120,26 +124,30 @@ class PILIQ:
         liq_res = ctypes.c_void_p()
         retval = self._lib.liq_image_quantize(liq_img, self._attr, ctypes.pointer(liq_res))
         if retval != 0:
-            print("Error quantize")
-            return None, None
+            _logger.error("libimagequant failed to quantize image.")
+        else:
+            palette = self._lib.liq_get_palette(liq_res).contents.to_numpy()
+            img_quantized = np.zeros((img.height, img.width), np.uint8, 'C')
 
-        palette = self._lib.liq_get_palette(liq_res).contents.to_numpy()
-        img_quantized = np.zeros((img.height, img.width), np.uint8, 'C')
-
-        retval = self._lib.liq_write_remapped_image(liq_res, liq_img, img_quantized.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img_quantized.size)
-        if retval != 0:
-            print("Error getting back quant img")
-            return None, None
+            retval = self._lib.liq_write_remapped_image(liq_res, liq_img, img_quantized.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img_quantized.size)
+            if retval != 0:
+                _logger.error("Failed to retrieve image data from libimagequant.")
 
         self._lib.liq_result_destroy(liq_res)
         self._lib.liq_image_destroy(liq_img)
-        return palette, img_quantized
+        return (palette, img_quantized) if retval == 0 else (None, None)
     ####
 
     @classmethod
     @__ensure_liq
     def get_version(cls) -> int:
         return cls._lib.liq_version()
+
+    @__ensure_liq
+    def destroy(self) -> None:
+        if self._attr is not None:
+            self._lib.liq_attr_destroy(self._attr)
+            self._attr = None
 
     @staticmethod
     def _find_library() -> Optional[ctypes.CDLL]:
