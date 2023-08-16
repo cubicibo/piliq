@@ -154,6 +154,7 @@ class PILIQ:
         LIB_NAME = 'libimagequant'
         if os.name == 'nt':
             import platform
+
             def get_dll_arch(fpath: Path) -> bool:
                 # https://stackoverflow.com/a/65586112
                 lut_arch = {332: 'I386', 512: 'IA64', 34404: 'AMD64', 452: 'ARM', 43620: 'AARCH64'}
@@ -164,9 +165,8 @@ class PILIQ:
                     f.seek(struct.unpack('<L', f.read(4))[0] + 4)
                     return lut_arch.get(struct.unpack('<H', f.read(2))[0], None)
                 return None
-
-            this_dir = Path(__file__).parent.absolute()
-            lib_path = this_dir.joinpath('lib', LIB_NAME+'.dll')
+            
+            lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), LIB_NAME+".dll"))
             if lib_path.exists() and get_dll_arch(lib_path) == platform.machine():
                 _logger.debug(f"Found embedded {lib_path} in folder, loading as DLL.")
                 return ctypes.CDLL(str(lib_path))
