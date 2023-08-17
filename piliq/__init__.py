@@ -28,11 +28,13 @@ import os
 import sys
 import ctypes
 import logging
+import subprocess
 
 from typing import Union, Optional
 from functools import wraps
 
 from dataclasses import dataclass
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 
 from PIL import Image
@@ -70,7 +72,58 @@ class RGBA:
     def from_bytes(cls, rgba_bytestring: bytes) -> 'RGBA':
         return cls(*list(map(ord, rgba_bytestring[:4])))
 
-class PILIQ:
+
+class _PNGQuantWrapper:
+    _app = 'pngquant'
+    _is_win32 = sys.platform == 'win32'
+    def __init__(self) -> None:
+        assert self._app is not None
+        assert self.is_ready(), "Cannot call set pngquant executable."
+
+    @classmethod
+    def bind(cls, fpath: Union[str, Path]) -> None:
+        if  Path(fpath).exists():
+            cls._app = fpath
+
+    @classmethod
+    def is_ready(cls) -> bool:
+        try:
+            return subprocess.run([cls._app, '--version'], capture_output=True).returncode == 0
+        except FileNotFoundError:
+            return False
+
+    def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+        assert img.mode == 'RGBA'
+        assert 0 < colors <= 256
+
+        in_tmp, out_tmp = NamedTemporaryFile(), NamedTemporaryFile()
+        if self._is_win32:
+            in_tmp.close()
+        img.save(in_tmp, format='PNG')
+
+        return_code = -127
+        with open(in_tmp.name, 'rb') as inf:
+            p = subprocess.Popen(f"{self._app} {colors} -", shell=True, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
+            p.communicate()
+            if (return_code := p.returncode) != 0:
+                _logger.warning(f"pngquant reported error {return_code}.")
+        palette, bitmap = None, None
+        if return_code == 0:
+            imgp = Image.open(out_tmp)
+            assert imgp.mode == 'P'
+
+            palette = np.asarray(list(imgp.palette.colors.keys()), dtype=np.uint8)
+            assert len(palette) <= colors
+            bitmap = np.asarray(imgp)
+            imgp.close()
+        out_tmp.close()
+        in_tmp.close()
+        if self._is_win32:
+            os.unlink(out_tmp.name)
+            os.unlink(in_tmp.name)
+        return palette, bitmap
+
+class _LIQWrapper:
     _lib = None
     def __init__(self) -> None:
         assert self._lib is not None, "Library must be loaded in the class before instantiating objects."
@@ -91,7 +144,7 @@ class PILIQ:
         return _ensure_liq_f
 
     @classmethod
-    def set_lib(cls, lib: Union[str, Path, ctypes.CDLL]) -> None:
+    def bind(cls, lib: Union[str, Path, ctypes.CDLL]) -> None:
         if lib is not None:
             if not isinstance(lib, ctypes.CDLL):
                 lib = ctypes.CDLL(lib)
@@ -155,7 +208,7 @@ class PILIQ:
         if os.name == 'nt':
             import platform
 
-            def get_dll_arch(fpath: Path) -> bool:
+            def match_dll_arch(fpath: Path) -> bool:
                 # https://stackoverflow.com/a/65586112
                 lut_arch = {332: 'I386', 512: 'IA64', 34404: 'AMD64', 452: 'ARM', 43620: 'AARCH64'}
                 import struct
@@ -163,24 +216,32 @@ class PILIQ:
                     assert f.read(2) == b'MZ'
                     f.seek(60)
                     f.seek(struct.unpack('<L', f.read(4))[0] + 4)
-                    return lut_arch.get(struct.unpack('<H', f.read(2))[0], None)
-                return None
-            
-            lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), LIB_NAME+".dll"))
-            if lib_path.exists() and get_dll_arch(lib_path) == platform.machine():
-                _logger.debug(f"Found embedded {lib_path} in folder, loading as DLL.")
+                    return lut_arch.get(struct.unpack('<H', f.read(2))[0], None) == platform.machine()
+                return False
+
+            lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), f"{LIB_NAME}_{platform.machine()}.dll"))
+            if lib_path.exists() and match_dll_arch(lib_path):
+                _logger.debug(f"Found embedded {lib_path} in folder, loading library.")
                 return ctypes.CDLL(str(lib_path))
 
         elif os.name == 'posix':
-            import subprocess
-            retry_linux = False
+            #libimagequant dylib is acting odd on OSX, escape this function.
+            if sys.platform.lower() == 'darwin':
+                _logger.debug(f"Evading library look-up, detected macOS.")
+                return None
 
-            ret = subprocess.run(['brew', '--prefix', LIB_NAME], capture_output=True)
-            if sys.platform.lower() != 'darwin' and (ret.stderr != b'' or ret.stdout == b''):
+            retry_linux = False
+            try:
+                ret = subprocess.run(['brew', '--prefix', LIB_NAME], capture_output=True)
+            except FileNotFoundError:
+                has_brew = False
+            else:
+                has_brew = ret.stderr == b'' and ret.stdout != b''
+            if not has_brew and sys.platform.lower() != 'darwin':
                 retry_linux = True
-            elif ret.stdout != b'':
+            elif has_brew and ret.stdout != b'':
                 if (lib_file := Path(str(ret.stdout, 'utf-8').strip()).joinpath('lib', LIB_NAME+'.dylib')).exists():
-                    _logger.debug(f"Found {lib_file}, loading as dylib.")
+                    _logger.debug(f"Found {lib_file}, loading library.")
                     return ctypes.CDLL(lib_file)
 
             if retry_linux:
@@ -190,9 +251,9 @@ class PILIQ:
                         _logger.debug(f"Found {fpath}, loading as shared object.")
                         return ctypes.CDLL(fpath)
         else:
-            _logger.warning(f"Unknown OS, {LIB_NAME} has to be loaded manually.")
+            _logger.debug(f"Unknown OS, {LIB_NAME} has to be loaded manually.")
             return None
-        _logger.warning(f"Failed to bind to {LIB_NAME}. Library must be set manually.")
+        _logger.debug(f"Failed to bind to {LIB_NAME}. Library must be set manually.")
         return None
 
     @staticmethod
@@ -256,15 +317,25 @@ class PILIQ:
     ####
 ####
 
+class PILIQ:
+    def __init__(self, fpath: [str, Path]) -> None:
+        small_fpath = str(fpath).lower()
+        if small_fpath.split('.')[-1] in ('dll', 'dylib', 'so'):
+            _LIQWrapper.bind(fpath)
+            self._wrapped = _LIQWrapper()
+        elif 'pngquant' in small_fpath:
+            _PNGQuantWrapper.bind(fpath)
+            self._wrapped = _PNGQuantWrapper()
+        else:
+            raise AssertionError("Cannot recognise the given library file or executable.")
+
+    def quantize(self, img: Image.Image, colors: int = 255):
+        return self._wrapped.quantize(img, colors)
+
+
+
+
+
 # Try to autoload the library by looking at the right place. If nothing work,
 # users will have to specify it themselves with PILIQ.set_lib(...)
 PILIQ.set_lib(PILIQ._find_library())
-
-# if __name__ == '__main__':
-#     img = Image.open('C:/Users/lpio/OneDrive - u-blox/Desktop/rgb.png').convert('RGBA')
-#     piq = PILIQ()
-#     p, i = piq.quantize(img, 255)
-#     Image.fromarray(p[i]).show()
-#     p, i = piq.quantize(img, 2)
-#     Image.fromarray(p[i]).show()
-#     sys.exit(0)
