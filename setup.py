@@ -26,6 +26,7 @@ SOFTWARE.
 
 from distutils.util import convert_path
 from typing import Any, Dict
+import sys
 
 from setuptools import setup
 
@@ -55,5 +56,6 @@ setup(
     ],
     python_requires='>=3.10',
     include_package_data=True,
-    package_data={NAME: ['libimagequant.dll']},
+    package_data={NAME: ['*.dll']} if sys.platform == 'win32' else {},
+    install_requires=["numpy", "Pillow"],
 )
