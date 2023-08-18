@@ -43,7 +43,7 @@ import numpy as np
 
 def get_logger(name: str = 'piliq',
                level: int = logging.INFO,
-               format_str: str = ' %(name)s: %(levelname).5s : %(message)s') -> logging.Logger:
+               format_str: str = ' %(name)s: %(levelname).4s : %(message)s') -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
     if not logger.handlers:
@@ -71,7 +71,7 @@ class RGBA:
     @classmethod
     def from_bytes(cls, rgba_bytestring: bytes) -> 'RGBA':
         return cls(*list(map(ord, rgba_bytestring[:4])))
-
+####
 
 class _PNGQuantWrapper:
     _app = 'pngquant'
@@ -88,11 +88,41 @@ class _PNGQuantWrapper:
     @classmethod
     def is_ready(cls) -> bool:
         try:
-            return subprocess.run([cls._app, '--version'], capture_output=True).returncode == 0
+            proc = subprocess.run([cls._app, '--version'], capture_output=True)
         except FileNotFoundError:
-            return False
+            if cls._is_win32:
+                try:
+                    proc = subprocess.run([cls._app + '.exe', '--version'], capture_output=True)
+                except FileNotFoundError:
+                    ...
+                else:
+                    if proc.returncode == 0:
+                        cls._app += '.exe'
+                        return True
+        else:
+            return proc.returncode == 0
+        return False
+
+    def _quantize_posix(self, img: Image.Image, colors: int = 255) -> ...:
+        w = NamedTemporaryFile()
+        with NamedTemporaryFile() as temp_file:
+            img.save(temp_file.name, format='png')
+            p = subprocess.Popen(f"{self._app} {colors} -", shell=True, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
+        imgp = Image.open(w)
+        #PIL palette data is glitched at this point, converting to RGBA fixes it, somehow.
+        imgrgba = imgp.convert('RGBA')
+        palette = np.reshape(imgp.getpalette('RGBA'), (-1, 4)).astype(np.uint8)
+        assert len(palette) <= colors
+        bitmap = np.asarray(imgp)
+        #Force the existence of RGBA PIL during this chunk of code (?)
+        del(imgrgba)
+        w.close()
+        return palette, bitmap
 
     def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+        if os.name == 'posix':
+           return self._quantize_posix(img, colors)
+
         assert img.mode == 'RGBA'
         assert 0 < colors <= 256
 
@@ -110,18 +140,22 @@ class _PNGQuantWrapper:
         palette, bitmap = None, None
         if return_code == 0:
             imgp = Image.open(out_tmp)
-            assert imgp.mode == 'P'
+            imgrgba = imgp.convert('RGBA')
 
-            palette = np.asarray(list(imgp.palette.colors.keys()), dtype=np.uint8)
+            palette = np.reshape(imgp.getpalette("RGBA"), (-1, 4)).astype(np.uint8)
             assert len(palette) <= colors
             bitmap = np.asarray(imgp)
             imgp.close()
+            del(imgrgba)
         out_tmp.close()
         in_tmp.close()
         if self._is_win32:
             os.unlink(out_tmp.name)
             os.unlink(in_tmp.name)
         return palette, bitmap
+
+    def destroy(self):
+        pass
 
 class _LIQWrapper:
     _lib = None
@@ -203,7 +237,7 @@ class _LIQWrapper:
             self._attr = None
 
     @staticmethod
-    def _find_library() -> Optional[ctypes.CDLL]:
+    def find_library() -> Optional[ctypes.CDLL]:
         LIB_NAME = 'libimagequant'
         if os.name == 'nt':
             import platform
@@ -318,24 +352,59 @@ class _LIQWrapper:
 ####
 
 class PILIQ:
-    def __init__(self, fpath: [str, Path]) -> None:
-        small_fpath = str(fpath).lower()
-        if small_fpath.split('.')[-1] in ('dll', 'dylib', 'so'):
-            _LIQWrapper.bind(fpath)
-            self._wrapped = _LIQWrapper()
-        elif 'pngquant' in small_fpath:
-            _PNGQuantWrapper.bind(fpath)
-            self._wrapped = _PNGQuantWrapper()
+    def __init__(self, binary: Optional[Union[str, Path]] = None, return_pil: bool = True) -> None:
+        if binary is None:
+            _logger.debug("No binary provided, performing look-up.")
+            if _PNGQuantWrapper.is_ready():
+                _logger.debug("Detected pngquant, using that.")
+                self._wrapped = _PNGQuantWrapper()
+            elif (is_ready := _LIQWrapper.is_ready()) or (cdl := _LIQWrapper.find_library()) is not None:
+                _logger.debug("Detected libimagequant library, using that.")
+                if not is_ready:
+                    _LIQWrapper.bind(cdl)
+                self._wrapped = _LIQWrapper()
+            else:
+                raise AssertionError("Could not locate pngquant or libimagequant, aborted.")
         else:
-            raise AssertionError("Cannot recognise the given library file or executable.")
+            str_binary =  str(binary).lower()
+            if 'pngquant' in str_binary:
+                _logger.debug("Executable path seems to be pngquant.")
+                _PNGQuantWrapper.bind(binary)
+                assert _PNGQuantWrapper.is_ready()
+                self._wrapped = _PNGQuantWrapper()
+            elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so'):
+                _logger.debug("Path seems to be libimagequant dynamic library.")
+                _LIQWrapper.bind(binary)
+                assert _LIQWrapper.is_ready()
+                self._wrapped = _LIQWrapper()
+            else:
+                raise AssertionError("Cannot identify the loaded binary file.")
+        self.return_pil = return_pil
 
-    def quantize(self, img: Image.Image, colors: int = 255):
-        return self._wrapped.quantize(img, colors)
+    def quantize(self, img: Image.Image, colors: int = 255) -> Union[Image.Image, tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]]:
+        assert self._wrapped is not None, "Destroyed instance."
+        pal, oimg = self._wrapped.quantize(img, colors)
+        if self.return_pil:
+            return Image.fromarray(pal[oimg], 'RGBA')
+        return pal, oimg
 
+    @property
+    def lib_name(self) -> str:
+        if isinstance(self._wrapped, _PNGQuantWrapper):
+            return 'pngquant'
+        elif isinstance(self._wrapped, _LIQWrapper):
+            return 'libimagequant'
+        else:
+            _logger.debug("PILIQ is not armed with any quantization library.")
+            return None
 
+    def destroy(self) -> None:
+        if self._wrapped is not None:
+            self._wrapped.destroy()
+            self._wrapped = None
 
-
-
-# Try to autoload the library by looking at the right place. If nothing work,
-# users will have to specify it themselves with PILIQ.set_lib(...)
-PILIQ.set_lib(PILIQ._find_library())
+    def set_log_level(self, level: int) -> None:
+        prev_level = _logger.level
+        _logger.setLevel(level)
+        _logger.debug(f"Changed logging level from {prev_level} to {level}.")
+####
