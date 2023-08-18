@@ -126,9 +126,9 @@ class _PNGQuantWrapper:
         assert img.mode == 'RGBA'
         assert 0 < colors <= 256
 
-        in_tmp, out_tmp = NamedTemporaryFile(), NamedTemporaryFile()
-        if self._is_win32:
-            in_tmp.close()
+        in_tmp, out_tmp = NamedTemporaryFile(delete=False), NamedTemporaryFile(delete=False)
+        #if self._is_win32:
+        #    in_tmp.close()
         img.save(in_tmp, format='PNG')
 
         return_code = -127
@@ -149,9 +149,11 @@ class _PNGQuantWrapper:
             del(imgrgba)
         out_tmp.close()
         in_tmp.close()
-        if self._is_win32:
+        try:
             os.unlink(out_tmp.name)
             os.unlink(in_tmp.name)
+        except:
+            pass
         return palette, bitmap
 
     def destroy(self):
@@ -230,11 +232,13 @@ class _LIQWrapper:
     def get_version(cls) -> int:
         return cls._lib.liq_version()
 
-    @__ensure_liq
     def destroy(self) -> None:
-        if self._attr is not None:
-            self._lib.liq_attr_destroy(self._attr)
-            self._attr = None
+        try:
+            if self._attr is not None:
+                self._lib.liq_attr_destroy(self._attr)
+                self._attr = None
+        except:
+            ...
 
     @staticmethod
     def find_library() -> Optional[ctypes.CDLL]:
@@ -374,7 +378,7 @@ class PILIQ:
                 _PNGQuantWrapper.bind(binary)
                 assert _PNGQuantWrapper.is_ready()
                 self._wrapped = _PNGQuantWrapper()
-            elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so'):
+            elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so') and Path(binary).exists():
                 _logger.debug("Path seems to be libimagequant dynamic library.")
                 _LIQWrapper.bind(binary)
                 assert _LIQWrapper.is_ready()
