@@ -57,4 +57,5 @@ setup(
     python_requires='>=3.10',
     include_package_data=True,
     package_data={NAME: ['*.dll']} if sys.platform == 'win32' else {},
+    install_requires=["numpy", "Pillow"],
 )

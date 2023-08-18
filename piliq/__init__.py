@@ -242,20 +242,22 @@ class _LIQWrapper:
         if os.name == 'nt':
             import platform
 
-            def match_dll_arch(fpath: Path) -> bool:
+            def match_dll_arch(fpath: Path, carch) -> bool:
                 # https://stackoverflow.com/a/65586112
-                lut_arch = {332: 'I386', 512: 'IA64', 34404: 'AMD64', 452: 'ARM', 43620: 'AARCH64'}
+                lut_arch = {332: 'I386', 512: 'IA64', 34404: 'x86_64', 452: 'ARM', 43620: 'AARCH64'}
                 import struct
                 with open(fpath, 'rb') as f:
                     assert f.read(2) == b'MZ'
                     f.seek(60)
                     f.seek(struct.unpack('<L', f.read(4))[0] + 4)
-                    return lut_arch.get(struct.unpack('<H', f.read(2))[0], None) == platform.machine()
+                    return lut_arch.get(struct.unpack('<H', f.read(2))[0], None) == carch
                 return False
 
-            lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), f"{LIB_NAME}_{platform.machine()}.dll"))
-            if lib_path.exists() and match_dll_arch(lib_path):
-                _logger.debug(f"Found embedded {lib_path} in folder, loading library.")
+            carch = platform.machine()
+            carch = "x86_64" if carch in ("AMD64", "x86_64") else carch
+            lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), f"{LIB_NAME}_{carch}.dll"))
+            if lib_path.exists() and match_dll_arch(lib_path, carch):
+                _logger.debug(f"Found embedded {lib_path} for {carch} in folder, loading library.")
                 return ctypes.CDLL(str(lib_path))
 
         elif os.name == 'posix':
@@ -387,6 +389,11 @@ class PILIQ:
         if self.return_pil:
             return Image.fromarray(pal[oimg], 'RGBA')
         return pal, oimg
+
+    def is_ready(self) -> bool:
+        if self._wrapped is not None:
+            return self._wrapped.is_ready()
+        return False
 
     @property
     def lib_name(self) -> str:
