@@ -76,9 +76,13 @@ class RGBA:
 class _PNGQuantWrapper:
     _app = 'pngquant'
     _is_win32 = sys.platform == 'win32'
+    _os_name = os.name
     def __init__(self) -> None:
         assert self._app is not None
         assert self.is_ready(), "Cannot call set pngquant executable."
+        self._max_quality = 100
+        self._speed = 4
+        self._dithering_level = 1.0
 
     @classmethod
     def bind(cls, fpath: Union[str, Path]) -> None:
@@ -103,11 +107,20 @@ class _PNGQuantWrapper:
             return proc.returncode == 0
         return False
 
+    def set_quality(self, max_quality: int) -> None:
+        self._max_quality = max_quality
+
+    def set_speed(self, speed: int) -> None:
+        self._speed = speed
+
+    def set_dithering_level(self, dithering_level: int) -> None:
+        self._dithering_level = dithering_level
+
     def _quantize_posix(self, img: Image.Image, colors: int = 255) -> ...:
         w = NamedTemporaryFile()
         with NamedTemporaryFile() as temp_file:
             img.save(temp_file.name, format='png')
-            p = subprocess.Popen(f"{self._app} {colors} -", shell=True, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
+            p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
         imgp = Image.open(w)
         #PIL palette data is glitched at this point, converting to RGBA fixes it, somehow.
         imgrgba = imgp.convert('RGBA')
@@ -120,7 +133,7 @@ class _PNGQuantWrapper:
         return palette, bitmap
 
     def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
-        if os.name == 'posix':
+        if __class__._os_name == 'posix':
            return self._quantize_posix(img, colors)
 
         assert img.mode == 'RGBA'
@@ -166,6 +179,8 @@ class _LIQWrapper:
         self._attr = self._lib.liq_attr_create()
         _logger.debug("Created liq attr handle.")
 
+        self._dithering_level = 1.0
+
     def __del__(self) -> None:
         if self._attr is not None:
             self._lib.liq_attr_destroy(self._attr)
@@ -197,6 +212,20 @@ class _LIQWrapper:
             return False
 
     @__ensure_liq
+    def set_dithering_level(self, dithering_level: float) -> None:
+        self._dithering_level = dithering_level
+
+    @__ensure_liq
+    def set_speed(self, speed: int) -> None:
+        self._lib.liq_set_speed(self._attr, speed)
+        assert self._lib.liq_get_speed(self._attr) == speed
+
+    @__ensure_liq
+    def set_quality(self, max_quality: int) -> None:
+        self._lib.liq_set_quality(self._attr, 0, max_quality)
+        assert self._lib.liq_get_max_quality(self._attr) == max_quality
+
+    @__ensure_liq
     def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
         if self._attr is None:
             _logger.error("Using a destroyed libimagequant instance, aborting.")
@@ -217,7 +246,8 @@ class _LIQWrapper:
         else:
             palette = self._lib.liq_get_palette(liq_res).contents.to_numpy()
             img_quantized = np.zeros((img.height, img.width), np.uint8, 'C')
-
+            if 0 <= self._dithering_level < 1.0:
+                self._lib.liq_set_dithering_level(liq_res, self._dithering_level)
             retval = self._lib.liq_write_remapped_image(liq_res, liq_img, img_quantized.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img_quantized.size)
             if retval != 0:
                 _logger.error("Failed to retrieve image data from libimagequant.")
@@ -335,6 +365,20 @@ class _LIQWrapper:
         lib.liq_get_max_colors.argtype = (ctypes.POINTER(liq_attr),)
         lib.liq_get_max_colors.restype = ctypes.c_int
 
+        #lib config
+        lib.liq_set_speed.argtype = (ctypes.POINTER(liq_attr), ctypes.c_int)
+        lib.liq_set_speed.restype = ctypes.c_int
+        lib.liq_get_speed.argtype = (ctypes.POINTER(liq_attr))
+        lib.liq_get_speed.restype = ctypes.c_int
+
+        lib.liq_set_quality.argtype = (ctypes.POINTER(liq_attr), ctypes.c_int, ctypes.c_int)
+        lib.liq_set_quality.restype = ctypes.c_int
+        lib.liq_get_max_quality.argtype = (ctypes.POINTER(liq_attr))
+        lib.liq_get_max_quality.restype = ctypes.c_int
+        lib.liq_get_min_quality.argtype = (ctypes.POINTER(liq_attr))
+        lib.liq_get_min_quality.restype = ctypes.c_int
+
+        #quantize
         lib.liq_image_create_rgba.argtype = (ctypes.POINTER(liq_attr), ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_double)
         lib.liq_image_create_rgba.restype = ctypes.POINTER(liq_image)
 
@@ -343,6 +387,9 @@ class _LIQWrapper:
 
         lib.liq_get_palette.argtype = (ctypes.POINTER(liq_result),)
         lib.liq_get_palette.restype = ctypes.POINTER(LIQPalette)
+
+        lib.liq_set_dithering_level.argtype = (ctypes.POINTER(liq_result), ctypes.c_float)
+        lib.liq_set_dithering_level.restype = ctypes.c_int
 
         lib.liq_write_remapped_image.argtype = (ctypes.POINTER(liq_result), ctypes.POINTER(liq_image), ctypes.c_void_p, ctypes.c_size_t)
         lib.liq_write_remapped_image.restype = ctypes.c_int
@@ -398,6 +445,21 @@ class PILIQ:
         if self._wrapped is not None:
             return self._wrapped.is_ready()
         return False
+
+    def set_quality(self, max_quality: int) -> None:
+        assert 0 < max_quality <= 100
+        if self._wrapped is not None:
+            self._wrapped.set_quality(max_quality)
+
+    def set_speed(self, speed: int) -> None:
+        assert 1 <= speed <= 10
+        if self._wrapped is not None:
+            self._wrapped.set_speed(speed)
+
+    def set_dithering_level(self, dithering_level: float) -> None:
+        assert 0 <= dithering_level <= 1.0
+        if self._wrapped is not None:
+            self._wrapped.set_dithering_level(dithering_level)
 
     @property
     def lib_name(self) -> str:
