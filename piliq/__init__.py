@@ -83,6 +83,7 @@ class _PNGQuantWrapper:
         self._max_quality = 100
         self._speed = 4
         self._dithering_level = 1.0
+        self._max_colors = 255
 
     @classmethod
     def bind(cls, fpath: Union[str, Path]) -> None:
@@ -116,7 +117,10 @@ class _PNGQuantWrapper:
     def set_dithering_level(self, dithering_level: int) -> None:
         self._dithering_level = dithering_level
 
-    def _quantize_posix(self, img: Image.Image, colors: int = 255) -> ...:
+    def set_default_max_colors(self, colors: int) -> None:
+        self._max_colors = colors
+
+    def _quantize_posix(self, img: Image.Image, colors: int) -> ...:
         w = NamedTemporaryFile()
         with NamedTemporaryFile() as temp_file:
             img.save(temp_file.name, format='png')
@@ -132,12 +136,15 @@ class _PNGQuantWrapper:
         w.close()
         return palette, bitmap
 
-    def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+    def quantize(self, img: Image.Image, colors: Optional[int] = None) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+        if colors is None:
+            colors = self._max_colors
+        else:
+            assert 2 <= colors <= 256
+        assert img.mode == 'RGBA'
+
         if __class__._os_name == 'posix':
            return self._quantize_posix(img, colors)
-
-        assert img.mode == 'RGBA'
-        assert 0 < colors <= 256
 
         in_tmp, out_tmp = NamedTemporaryFile(delete=False), NamedTemporaryFile(delete=False)
         #if self._is_win32:
@@ -180,6 +187,7 @@ class _LIQWrapper:
         _logger.debug("Created liq attr handle.")
 
         self._dithering_level = 1.0
+        self._max_colors = 255
 
     def __del__(self) -> None:
         if self._attr is not None:
@@ -226,15 +234,22 @@ class _LIQWrapper:
         assert self._lib.liq_get_max_quality(self._attr) == max_quality
 
     @__ensure_liq
-    def quantize(self, img: Image.Image, colors: int = 255) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+    def set_default_max_colors(self, colors: int) -> None:
+        self._max_colors = colors
+        self._lib.liq_set_max_colors(self._attr, self._max_colors)
+
+    @__ensure_liq
+    def quantize(self, img: Image.Image, colors: Optional[int] = None) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
         if self._attr is None:
             _logger.error("Using a destroyed libimagequant instance, aborting.")
             return None, None
 
         assert img.mode == 'RGBA'
-        assert 0 < colors <= 256
-        self._lib.liq_set_max_colors(self._attr, colors)
-        assert self._lib.liq_get_max_colors(self._attr) == colors
+
+        if colors is not None:
+            assert 0 < colors <= 256
+            self._lib.liq_set_max_colors(self._attr, colors)
+            assert self._lib.liq_get_max_colors(self._attr) == colors
 
         img_array = np.ascontiguousarray(img, np.uint8)
         liq_img = self._lib.liq_image_create_rgba(self._attr, img_array.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img.width, img.height, 0)
@@ -254,6 +269,10 @@ class _LIQWrapper:
 
         self._lib.liq_result_destroy(liq_res)
         self._lib.liq_image_destroy(liq_img)
+
+        if colors is not None:
+            self._lib.liq_set_max_colors(self._attr, self._max_colors)
+
         return (palette, img_quantized) if retval == 0 else (None, None)
     ####
 
@@ -434,7 +453,7 @@ class PILIQ:
                 raise AssertionError("Cannot identify the loaded binary file.")
         self.return_pil = return_pil
 
-    def quantize(self, img: Image.Image, colors: int = 255) -> Union[Image.Image, tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]]:
+    def quantize(self, img: Image.Image, colors: Optional[int] = None) -> Union[Image.Image, tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]]:
         assert self._wrapped is not None, "Destroyed instance."
         pal, oimg = self._wrapped.quantize(img, colors)
         if self.return_pil:
@@ -460,6 +479,11 @@ class PILIQ:
         assert 0 <= dithering_level <= 1.0
         if self._wrapped is not None:
             self._wrapped.set_dithering_level(dithering_level)
+
+    def set_default_max_colors(self, colors: 255) -> None:
+        assert 2 <= colors <= 256
+        if self._wrapped is not None:
+            self._wrapped.set_default_max_colors(colors)
 
     @property
     def lib_name(self) -> str:
