@@ -76,7 +76,7 @@ class RGBA:
 class _PNGQuantWrapper:
     _app = 'pngquant'
     _is_win32 = sys.platform == 'win32'
-    _os_name = os.name
+    _is_posix = os.name == 'posix'
     def __init__(self) -> None:
         assert self._app is not None
         assert self.is_ready(), "Cannot call set pngquant executable."
@@ -111,6 +111,9 @@ class _PNGQuantWrapper:
     def set_quality(self, max_quality: int) -> None:
         self._max_quality = max_quality
 
+    def get_quality(self) -> int:
+        return self._max_quality
+
     def set_speed(self, speed: int) -> None:
         self._speed = speed
 
@@ -143,7 +146,7 @@ class _PNGQuantWrapper:
             assert 2 <= colors <= 256
         assert img.mode == 'RGBA'
 
-        if __class__._os_name == 'posix':
+        if __class__._is_posix:
            return self._quantize_posix(img, colors)
 
         in_tmp, out_tmp = NamedTemporaryFile(delete=False), NamedTemporaryFile(delete=False)
@@ -153,7 +156,7 @@ class _PNGQuantWrapper:
 
         return_code = -127
         with open(in_tmp.name, 'rb') as inf:
-            p = subprocess.Popen(f"{self._app} {colors} -", shell=True, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
+            p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
             p.communicate()
             if (return_code := p.returncode) != 0:
                 _logger.warning(f"pngquant reported error {return_code}.")
@@ -232,6 +235,10 @@ class _LIQWrapper:
     def set_quality(self, max_quality: int) -> None:
         self._lib.liq_set_quality(self._attr, 0, max_quality)
         assert self._lib.liq_get_max_quality(self._attr) == max_quality
+
+    @__ensure_liq
+    def get_quality(self) -> int:
+        return self._lib.liq_get_max_quality(self._attr)
 
     @__ensure_liq
     def set_default_max_colors(self, colors: int) -> None:
@@ -484,6 +491,10 @@ class PILIQ:
         assert 2 <= colors <= 256
         if self._wrapped is not None:
             self._wrapped.set_default_max_colors(colors)
+
+    def get_quality(self) -> Optional[int]:
+        if self._wrapped is not None:
+            return self._wrapped.get_quality()
 
     @property
     def lib_name(self) -> str:
