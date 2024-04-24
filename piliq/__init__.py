@@ -3,7 +3,7 @@
 """
 MIT License
 
-Copyright (c) 2023 cubicibo
+Copyright (c) 2024 cubicibo
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -117,8 +117,11 @@ class _PNGQuantWrapper:
     def set_speed(self, speed: int) -> None:
         self._speed = speed
 
-    def set_dithering_level(self, dithering_level: int) -> None:
+    def set_dithering_level(self, dithering_level: float) -> None:
         self._dithering_level = dithering_level
+
+    def get_dithering_level(self) -> float:
+        return self._dithering_level
 
     def set_default_max_colors(self, colors: int) -> None:
         self._max_colors = colors
@@ -227,9 +230,17 @@ class _LIQWrapper:
         self._dithering_level = dithering_level
 
     @__ensure_liq
+    def get_dithering_level(self) -> float:
+        return self._dithering_level
+
+    @__ensure_liq
     def set_speed(self, speed: int) -> None:
         self._lib.liq_set_speed(self._attr, speed)
         assert self._lib.liq_get_speed(self._attr) == speed
+
+    @__ensure_liq
+    def get_speed(self) -> int:
+        return self._lib.liq_get_speed(self._attr)
 
     @__ensure_liq
     def set_quality(self, max_quality: int) -> None:
@@ -268,8 +279,7 @@ class _LIQWrapper:
         else:
             palette = self._lib.liq_get_palette(liq_res).contents.to_numpy()
             img_quantized = np.zeros((img.height, img.width), np.uint8, 'C')
-            if 0 <= self._dithering_level < 1.0:
-                self._lib.liq_set_dithering_level(liq_res, self._dithering_level)
+            self._lib.liq_set_dithering_level(liq_res, ctypes.c_float(self.get_dithering_level()))
             retval = self._lib.liq_write_remapped_image(liq_res, liq_img, img_quantized.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img_quantized.size)
             if retval != 0:
                 _logger.error("Failed to retrieve image data from libimagequant.")
@@ -485,7 +495,7 @@ class PILIQ:
     def set_dithering_level(self, dithering_level: float) -> None:
         assert 0 <= dithering_level <= 1.0
         if self._wrapped is not None:
-            self._wrapped.set_dithering_level(dithering_level)
+            self._wrapped.set_dithering_level(float(dithering_level))
 
     def set_default_max_colors(self, colors: 255) -> None:
         assert 2 <= colors <= 256
@@ -495,6 +505,14 @@ class PILIQ:
     def get_quality(self) -> Optional[int]:
         if self._wrapped is not None:
             return self._wrapped.get_quality()
+
+    def get_dithering_level(self) -> Optional[float]:
+        if self._wrapped is not None:
+            return self._wrapped.get_dithering_level()
+
+    def get_speed(self) -> Optional[int]:
+        if self._wrapped is not None:
+            return self._wrapped.get_speed()
 
     @property
     def lib_name(self) -> str:

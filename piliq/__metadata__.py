@@ -3,7 +3,7 @@
 """
 MIT License
 
-Copyright (c) 2023 cubicibo
+Copyright (c) 2024 cubicibo
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,7 +26,7 @@ SOFTWARE.
 
 __MAJOR = 0
 __MINOR = 0
-__REV   = 4
+__REV   = 5
 
 __version__ = '.'.join(map(str, [__MAJOR, __MINOR, __REV]))
 __author__ = 'cubicibo'
