@@ -73,6 +73,157 @@ class RGBA:
         return cls(*list(map(ord, rgba_bytestring[:4])))
 ####
 
+class _QuantizrWrapper:
+    _lib = None
+    def __init__(self) -> None:
+        assert self._lib is not None
+        self._max_colors = 255
+        self._dithering_level = 1.0
+        self._attr = self._lib.quantizr_new_options()
+
+    def set_quality(self, max_quality: int) -> None:
+        pass
+
+    def get_quality(self) -> int:
+        return 100
+
+    def set_speed(self, speed: int) -> None:
+        pass
+
+    def set_dithering_level(self, dithering_level: float) -> None:
+        self._dithering_level = dithering_level
+
+    def get_dithering_level(self) -> float:
+        return self._dithering_level
+
+    def set_default_max_colors(self, colors: int) -> None:
+        self._max_colors = colors
+        self._lib.quantizr_set_max_colors(self._attr, self._max_colors)
+
+    @classmethod
+    def is_ready(cls) -> bool:
+        return cls._lib is not None
+
+    @classmethod
+    def bind(cls, libp: [ctypes.CDLL | Path | str]) -> bool:
+        if isinstance(libp, (Path, str)):
+            libp = Path(libp)
+            assert libp.exists()
+            libp = ctypes.CDLL(libp)
+        cls._write_interface(libp)
+        cls._lib = libp
+
+    @staticmethod
+    def _write_interface(lib: ctypes.CDLL) -> None:
+        class ATTR(ctypes.Structure): pass
+        class IMAGE(ctypes.Structure): pass
+        class RESULT(ctypes.Structure): pass
+
+        class QuantizrPalette(ctypes.Structure):
+            _fields_ = [("count", ctypes.c_uint), ("entries", ctypes.c_uint * 256)]
+
+        #attr
+        lib.quantizr_new_options.argtype = (None,)
+        lib.quantizr_new_options.restype = ctypes.POINTER(ATTR)
+        lib.quantizr_free_options.argtype = (ctypes.POINTER(ATTR), )
+        lib.quantizr_free_options.restype = None
+
+        #quantize opts
+        lib.quantizr_set_max_colors.argtype = (ctypes.POINTER(ATTR), ctypes.c_int)
+        lib.quantizr_set_max_colors.restype = ctypes.c_int
+
+        #quantize
+        lib.quantizr_create_image_rgba.argtype = (ctypes.c_char_p, ctypes.c_int, ctypes.c_int)
+        lib.quantizr_create_image_rgba.restype = ctypes.POINTER(IMAGE)
+
+        lib.quantizr_quantize.argtype = (ctypes.POINTER(IMAGE), ctypes.POINTER(ATTR))
+        lib.quantizr_quantize.restype = ctypes.POINTER(RESULT)
+
+        lib.quantizr_get_palette.argtype = (ctypes.POINTER(RESULT),)
+        lib.quantizr_get_palette.restype = ctypes.POINTER(QuantizrPalette)
+
+        lib.quantizr_set_dithering_level.argtype = (ctypes.POINTER(RESULT), ctypes.c_float)
+        lib.quantizr_set_dithering_level.restype = ctypes.c_int
+
+        lib.quantizr_remap.argtype = (ctypes.POINTER(RESULT), ctypes.POINTER(IMAGE), ctypes.c_char_p, ctypes.c_uint)
+        lib.quantizr_remap.restype = ctypes.c_int
+
+        lib.quantizr_free_image.argtype = (ctypes.POINTER(IMAGE),)
+        lib.quantizr_free_image.restype = None
+
+        lib.quantizr_free_result.argtype = (ctypes.POINTER(RESULT),)
+        lib.quantizr_free_result.restype = None
+
+        _logger.debug(f"Loaded quantizr.")
+
+    @staticmethod
+    def find_library() -> Optional[ctypes.CDLL]:
+        LIB_NAME = 'libquantizr'
+        if sys.platform.lower() != 'darwin':
+            logger.debug("Not macOS, evading.")
+            return None
+        import platform
+        carch = platform.machine()
+        lib_path = Path(os.path.join(os.path.dirname(sys.modules["piliq"].__file__), f"{LIB_NAME}_{carch}.dylib"))
+        if lib_path.exists():
+            _logger.debug(f"Found embedded {lib_path} for {carch} in folder, loading library.")
+            return ctypes.CDLL(str(lib_path))
+        _logger.debug("Did not find embedded quantizr.")
+        return None
+
+    def quantize(self, img: Image.Image, colors: Optional[int] = None) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
+        if self._attr is None:
+            _logger.error("Using a destroyed quantizr instance, aborting.")
+            return None, None
+
+        assert img.mode == 'RGBA'
+        if colors is not None:
+            assert 0 < colors <= 256
+            self._lib.quantizr_set_max_colors(self._attr, colors)
+
+        #input_img = np.ascontiguousarray(img, np.uint8).flatten().data.tobytes()
+        liq_img = self._lib.quantizr_create_image_rgba(img.tobytes(), int(img.width), int(img.height))
+        assert liq_img
+
+        liq_res = self._lib.quantizr_quantize(liq_img, self._attr)
+        assert liq_res
+
+        self._lib.quantizr_set_dithering_level(liq_res, ctypes.c_float(self.get_dithering_level()))
+
+        data = bytearray([0]) * (img.width * img.height)
+        retval = self._lib.quantizr_remap(liq_res, liq_img, (ctypes.c_char*len(data)).from_buffer(data), len(data))
+        if retval == 0:
+            data = np.asarray(data, np.uint8).reshape((img.height, img.width))
+
+            palette = self._lib.quantizr_get_palette(liq_res)
+            pal = np.zeros((palette.contents.count, 4), np.uint8)
+            for entry_id in range(palette.contents.count):
+                pal[entry_id, 3] = 0xFF & (palette.contents.entries[entry_id] >> 24)
+                pal[entry_id, 2] = 0xFF & (palette.contents.entries[entry_id] >> 16)
+                pal[entry_id, 1] = 0xFF & (palette.contents.entries[entry_id] >> 8)
+                pal[entry_id, 0] = 0xFF & (palette.contents.entries[entry_id])
+
+        self._lib.quantizr_free_result(liq_res)
+        self._lib.quantizr_free_image(liq_img)
+
+        if colors is not None:
+            self._lib.quantizr_set_max_colors(self._attr, self._max_colors)
+
+        return (pal, data) if retval == 0 else (None, None)
+
+    def __del__(self) -> None:
+        if self._attr is not None:
+            self._lib.quantizr_free_options(self._attr)
+            _logger.debug("Destroyed quantizr attr handle.")
+
+    def destroy(self) -> None:
+        try:
+            if self._attr is not None:
+                self._lib.quantizr_free_options(self._attr)
+                self._attr = None
+        except:
+            ...
+
 class _PNGQuantWrapper:
     _app = 'pngquant'
     _is_win32 = sys.platform == 'win32'
@@ -270,7 +421,7 @@ class _LIQWrapper:
             assert self._lib.liq_get_max_colors(self._attr) == colors
 
         img_array = np.ascontiguousarray(img, np.uint8)
-        liq_img = self._lib.liq_image_create_rgba(self._attr, img_array.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img.width, img.height, 0)
+        liq_img = self._lib.liq_image_create_rgba(self._attr, img.tobytes(), img.width, img.height, 0)
 
         liq_res = ctypes.c_void_p()
         retval = self._lib.liq_image_quantize(liq_img, self._attr, ctypes.pointer(liq_res))
@@ -364,7 +515,7 @@ class _LIQWrapper:
 
     @staticmethod
     def _write_interface(lib: ctypes.CDLL) -> None:
-        class LIQColor(ctypes.Structure):
+        class _LIQColor(ctypes.Structure):
             _fields_ = [("r", ctypes.c_char), ("g", ctypes.c_char), ("b", ctypes.c_char), ("a", ctypes.c_char)]
 
             def to_tuple(self) -> tuple[int, int, int, int]:
@@ -373,8 +524,8 @@ class _LIQWrapper:
             def to_rgba(self) -> RGBA:
                 return RGBA(*self.to_tuple())
 
-        class LIQPalette(ctypes.Structure):
-            _fields_ = [("count", ctypes.c_uint), ("entries", LIQColor * 256)]
+        class _LIQPalette(ctypes.Structure):
+            _fields_ = [("count", ctypes.c_uint), ("entries", _LIQColor * 256)]
 
             def to_numpy(self) -> npt.NDArray[np.uint8]:
                 return np.array([self.entries[k].to_tuple() for k in range(0, self.count)], dtype=np.uint8)
@@ -422,7 +573,7 @@ class _LIQWrapper:
         lib.liq_image_quantize.restype = ctypes.c_int
 
         lib.liq_get_palette.argtype = (ctypes.POINTER(liq_result),)
-        lib.liq_get_palette.restype = ctypes.POINTER(LIQPalette)
+        lib.liq_get_palette.restype = ctypes.POINTER(_LIQPalette)
 
         lib.liq_set_dithering_level.argtype = (ctypes.POINTER(liq_result), ctypes.c_float)
         lib.liq_set_dithering_level.restype = ctypes.c_int
@@ -444,7 +595,12 @@ class PILIQ:
     def __init__(self, binary: Optional[Union[str, Path]] = None, return_pil: bool = True) -> None:
         if binary is None:
             _logger.debug("No binary provided, performing look-up.")
-            if _PNGQuantWrapper.is_ready():
+            if (is_ready := _QuantizrWrapper.is_ready()) or (cdl := _QuantizrWrapper.find_library()):
+                _logger.debug("Detected libquantizr, using that.")
+                if not is_ready:
+                    _QuantizrWrapper.bind(cdl)
+                self._wrapped = _QuantizrWrapper()
+            elif _PNGQuantWrapper.is_ready():
                 _logger.debug("Detected pngquant, using that.")
                 self._wrapped = _PNGQuantWrapper()
             elif (is_ready := _LIQWrapper.is_ready()) or (cdl := _LIQWrapper.find_library()) is not None:
@@ -463,9 +619,14 @@ class PILIQ:
                 self._wrapped = _PNGQuantWrapper()
             elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so') and Path(binary).exists():
                 _logger.debug("Path seems to be libimagequant dynamic library.")
-                _LIQWrapper.bind(binary)
-                assert _LIQWrapper.is_ready()
-                self._wrapped = _LIQWrapper()
+                if sys.platform.lower() == 'darwin':
+                    _QuantizrWrapper.bind(binary)
+                    assert _QuantizrWrapper.is_ready()
+                    self._wrapped = _QuantizrWrapper()
+                else:
+                    _LIQWrapper.bind(binary)
+                    assert _LIQWrapper.is_ready()
+                    self._wrapped = _LIQWrapper()
             else:
                 raise AssertionError("Cannot identify the loaded binary file.")
         self.return_pil = return_pil
@@ -520,9 +681,14 @@ class PILIQ:
             return 'pngquant'
         elif isinstance(self._wrapped, _LIQWrapper):
             return 'libimagequant'
+        elif isinstance(self._wrapped, _QuantizrWrapper):
+            return 'quantizr'
         else:
             _logger.debug("PILIQ is not armed with any quantization library.")
             return None
+
+    def __del__(self):
+        self.destroy()
 
     def destroy(self) -> None:
         if self._wrapped is not None:

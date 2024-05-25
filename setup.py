@@ -39,6 +39,13 @@ with open(convert_path(f"{NAME}/__metadata__.py"), encoding='utf-8') as f:
 with open('README.md', encoding='utf-8') as fh:
     long_description = fh.read()
 
+if sys.platform == 'win32':
+    pkg_data = {NAME: ['*.dll']}
+elif sys.platform == 'darwin':
+    pkg_data = {NAME: ['*.dylib']}
+else:
+    pkg_data = {}
+
 setup(
     name=NAME,
     version=meta['__version__'],
@@ -56,6 +63,6 @@ setup(
     ],
     python_requires='>=3.10',
     include_package_data=True,
-    package_data={NAME: ['*.dll']} if sys.platform == 'win32' else {},
+    package_data=pkg_data,
     install_requires=["numpy", "Pillow"],
 )
