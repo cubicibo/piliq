@@ -160,7 +160,7 @@ class _QuantizrWrapper:
     def find_library() -> Optional[ctypes.CDLL]:
         LIB_NAME = 'libquantizr'
         if sys.platform.lower() != 'darwin':
-            logger.debug("Not macOS, evading.")
+            _logger.debug("Not macOS, evading.")
             return None
         import platform
         carch = platform.machine()
@@ -224,7 +224,7 @@ class _QuantizrWrapper:
         except:
             ...
 
-class _PNGQuantWrapper:
+class PNGQuantWrapper:
     _app = 'pngquant'
     _is_win32 = sys.platform == 'win32'
     _is_posix = os.name == 'posix'
@@ -593,6 +593,7 @@ class _LIQWrapper:
 
 class PILIQ:
     def __init__(self, binary: Optional[Union[str, Path]] = None, return_pil: bool = True) -> None:
+        self._wrapped = None
         if binary is None:
             _logger.debug("No binary provided, performing look-up.")
             if (is_ready := _QuantizrWrapper.is_ready()) or (cdl := _QuantizrWrapper.find_library()):
@@ -600,9 +601,9 @@ class PILIQ:
                 if not is_ready:
                     _QuantizrWrapper.bind(cdl)
                 self._wrapped = _QuantizrWrapper()
-            elif _PNGQuantWrapper.is_ready():
+            elif PNGQuantWrapper.is_ready():
                 _logger.debug("Detected pngquant, using that.")
-                self._wrapped = _PNGQuantWrapper()
+                self._wrapped = PNGQuantWrapper()
             elif (is_ready := _LIQWrapper.is_ready()) or (cdl := _LIQWrapper.find_library()) is not None:
                 _logger.debug("Detected libimagequant library, using that.")
                 if not is_ready:
@@ -614,9 +615,9 @@ class PILIQ:
             str_binary =  str(binary).lower()
             if 'pngquant' in str_binary:
                 _logger.debug("Executable path seems to be pngquant.")
-                _PNGQuantWrapper.bind(binary)
-                assert _PNGQuantWrapper.is_ready()
-                self._wrapped = _PNGQuantWrapper()
+                PNGQuantWrapper.bind(binary)
+                assert PNGQuantWrapper.is_ready()
+                self._wrapped = PNGQuantWrapper()
             elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so') and Path(binary).exists():
                 _logger.debug("Path seems to be libimagequant dynamic library.")
                 if sys.platform.lower() == 'darwin':
@@ -677,7 +678,7 @@ class PILIQ:
 
     @property
     def lib_name(self) -> str:
-        if isinstance(self._wrapped, _PNGQuantWrapper):
+        if isinstance(self._wrapped, PNGQuantWrapper):
             return 'pngquant'
         elif isinstance(self._wrapped, _LIQWrapper):
             return 'libimagequant'
