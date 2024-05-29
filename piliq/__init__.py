@@ -160,7 +160,7 @@ class _QuantizrWrapper:
     def find_library() -> Optional[ctypes.CDLL]:
         LIB_NAME = 'libquantizr'
         if sys.platform.lower() != 'darwin':
-            _logger.debug("Not macOS, evading.")
+            _logger.debug("Not macOS, evading libquantizr loader.")
             return None
         import platform
         carch = platform.machine()
@@ -304,8 +304,6 @@ class PNGQuantWrapper:
            return self._quantize_posix(img, colors)
 
         in_tmp, out_tmp = NamedTemporaryFile(delete=False), NamedTemporaryFile(delete=False)
-        #if self._is_win32:
-        #    in_tmp.close()
         img.save(in_tmp, format='PNG')
 
         return_code = -127
@@ -592,23 +590,31 @@ class _LIQWrapper:
 ####
 
 class PILIQ:
-    def __init__(self, binary: Optional[Union[str, Path]] = None, return_pil: bool = True) -> None:
+    def __init__(self, binary: Optional[Union[str, Path]] = None, return_pil: bool = True, /, *, _wrapper = None) -> None:
+        self.return_pil = return_pil
         self._wrapped = None
+
+        if _wrapper is not None:
+            self._wrapped = _wrapper
+            return
+
         if binary is None:
             _logger.debug("No binary provided, performing look-up.")
-            if (is_ready := _QuantizrWrapper.is_ready()) or (cdl := _QuantizrWrapper.find_library()):
-                _logger.debug("Detected libquantizr, using that.")
-                if not is_ready:
-                    _QuantizrWrapper.bind(cdl)
-                self._wrapped = _QuantizrWrapper()
-            elif PNGQuantWrapper.is_ready():
-                _logger.debug("Detected pngquant, using that.")
-                self._wrapped = PNGQuantWrapper()
-            elif (is_ready := _LIQWrapper.is_ready()) or (cdl := _LIQWrapper.find_library()) is not None:
+
+            if (is_ready := _LIQWrapper.is_ready()) or (cdl := _LIQWrapper.find_library()) is not None:
                 _logger.debug("Detected libimagequant library, using that.")
                 if not is_ready:
                     _LIQWrapper.bind(cdl)
                 self._wrapped = _LIQWrapper()
+            elif PNGQuantWrapper.is_ready():
+                _logger.debug("Detected pngquant, using that.")
+                self._wrapped = PNGQuantWrapper()
+            # quantizr sometime returns garbage, consistently on some image. Do not ever use it by default.
+            #elif (is_ready := _QuantizrWrapper.is_ready()) or (cdl := _QuantizrWrapper.find_library()):
+            #    _logger.debug("Detected libquantizr, using that.")
+            #    if not is_ready:
+            #        _QuantizrWrapper.bind(cdl)
+            #    self._wrapped = _QuantizrWrapper()
             else:
                 raise AssertionError("Could not locate pngquant or libimagequant, aborted.")
         else:
@@ -619,18 +625,28 @@ class PILIQ:
                 assert PNGQuantWrapper.is_ready()
                 self._wrapped = PNGQuantWrapper()
             elif str_binary.split('.')[-1] in ('dll', 'dylib', 'so') and Path(binary).exists():
-                _logger.debug("Path seems to be libimagequant dynamic library.")
-                if sys.platform.lower() == 'darwin':
-                    _QuantizrWrapper.bind(binary)
-                    assert _QuantizrWrapper.is_ready()
-                    self._wrapped = _QuantizrWrapper()
-                else:
+                _logger.debug("Path seems to be a dynamic library.")
+                try:
                     _LIQWrapper.bind(binary)
+                except:
+                    pass
+                else:
                     assert _LIQWrapper.is_ready()
                     self._wrapped = _LIQWrapper()
+
+                if not self._wrapped and sys.platform.lower() == 'darwin':
+                    try:
+                        _QuantizrWrapper.bind(binary)
+                    except:
+                        pass
+                    else:
+                        assert _QuantizrWrapper.is_ready()
+                        self._wrapped = _QuantizrWrapper()
+
+                if not self._wrapped:
+                    raise AssertionError(f"Cannot identify the dynamic library binary '{binary}'.")
             else:
                 raise AssertionError("Cannot identify the loaded binary file.")
-        self.return_pil = return_pil
 
     def quantize(self, img: Image.Image, colors: Optional[int] = None) -> Union[Image.Image, tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]]:
         assert self._wrapped is not None, "Destroyed instance."
@@ -696,7 +712,8 @@ class PILIQ:
             self._wrapped.destroy()
             self._wrapped = None
 
-    def set_log_level(self, level: int) -> None:
+    @staticmethod
+    def set_log_level(level: int) -> None:
         prev_level = _logger.level
         _logger.setLevel(level)
         _logger.debug(f"Changed logging level from {prev_level} to {level}.")
