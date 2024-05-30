@@ -81,14 +81,21 @@ class _QuantizrWrapper:
         self._dithering_level = 1.0
         self._attr = self._lib.quantizr_new_options()
 
+        #unused
+        self._max_quality = 100
+        self._speed = 4
+
     def set_quality(self, max_quality: int) -> None:
-        pass
+        self._max_quality = max_quality
 
     def get_quality(self) -> int:
         return 100
 
     def set_speed(self, speed: int) -> None:
-        pass
+        self._speed = speed
+
+    def get_speed(self) -> int:
+        return self._speed
 
     def set_dithering_level(self, dithering_level: float) -> None:
         self._dithering_level = dithering_level
@@ -99,6 +106,9 @@ class _QuantizrWrapper:
     def set_default_max_colors(self, colors: int) -> None:
         self._max_colors = colors
         self._lib.quantizr_set_max_colors(self._attr, self._max_colors)
+
+    def get_default_max_colors(self) -> int:
+        return self._max_colors
 
     @classmethod
     def is_ready(cls) -> bool:
@@ -154,7 +164,7 @@ class _QuantizrWrapper:
         lib.quantizr_free_result.argtype = (ctypes.POINTER(RESULT),)
         lib.quantizr_free_result.restype = None
 
-        _logger.debug(f"Loaded quantizr.")
+        _logger.debug("Loaded quantizr.")
 
     @staticmethod
     def find_library() -> Optional[ctypes.CDLL]:
@@ -228,6 +238,7 @@ class PNGQuantWrapper:
     _app = 'pngquant'
     _is_win32 = sys.platform == 'win32'
     _is_posix = os.name == 'posix'
+    _use_shell = True
     def __init__(self) -> None:
         assert self._app is not None
         assert self.is_ready(), "Cannot call set pngquant executable."
@@ -240,15 +251,60 @@ class PNGQuantWrapper:
     def bind(cls, fpath: Union[str, Path]) -> None:
         if  Path(fpath).exists():
             cls._app = fpath
+        cls.to_abs_exec()
+
+    @classmethod
+    def to_abs_exec(cls) -> None:
+        if not cls._use_shell:
+            return
+
+        maybe_abs_exec = None
+        maybe_path = Path(cls._app)
+        if maybe_path.exists():
+            maybe_abs_exec = maybe_path.resolve()
+        else:
+            cmd = None
+            if cls._is_win32:
+                cmd = ['where.exe']
+            elif cls._is_posix:
+                cmd = ['command', '-v']
+            if cmd is not None:
+                prun = subprocess.run(f"{' '.join(cmd)} {cls._app}", capture_output=True, shell=True)
+                if cls._is_win32 and prun.returncode:
+                    prun = subprocess.run(f"{cmd} {cls._app}.exe", capture_output=True, shell=True)
+                path = prun.stdout.split()
+                if len(path) > 0 and 0 == prun.returncode:
+                    maybe_abs_exec = Path(os.fsdecode(path[0]).strip())
+        if isinstance(maybe_abs_exec, Path) and maybe_abs_exec.exists():
+            maybe_abs_exec = str(maybe_abs_exec)
+            if 0 == cls._test_cmd_version(maybe_abs_exec):
+                _logger.debug(f"Found pngquant path '{maybe_abs_exec}', replacing '{cls._app}'")
+                cls._app = maybe_abs_exec
+                cls._use_shell = False
+
+    @staticmethod
+    def _test_cmd_version(exep: str) -> int:
+        try:
+            proc = subprocess.run([exep, '--version'], capture_output=True, shell=False)
+        except FileNotFoundError:
+            return -1
+        else:
+            return proc.returncode
 
     @classmethod
     def is_ready(cls) -> bool:
         try:
-            proc = subprocess.run([cls._app, '--version'], capture_output=True)
+            if cls._use_shell:
+                proc = subprocess.run(f"{cls._app} --version", capture_output=True, shell=True)
+            else:
+                proc = subprocess.run([cls._app, '--version'], capture_output=True, shell=False)
         except FileNotFoundError:
             if cls._is_win32:
                 try:
-                    proc = subprocess.run([cls._app + '.exe', '--version'], capture_output=True)
+                    if cls._use_shell:
+                        proc = subprocess.run(f"{cls._app}.exe --version", capture_output=True, shell=True)
+                    else:
+                        proc = subprocess.run([cls._app + '.exe', '--version'], capture_output=True, shell=False)
                 except FileNotFoundError:
                     ...
                 else:
@@ -277,19 +333,29 @@ class PNGQuantWrapper:
     def set_default_max_colors(self, colors: int) -> None:
         self._max_colors = colors
 
-    def _quantize_posix(self, img: Image.Image, colors: int) -> ...:
+    def get_default_max_colors(self) -> int:
+        return self._max_colors
+
+    def _quantize_posix(self, img: Image.Image, colors: int) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
         w = NamedTemporaryFile()
         with NamedTemporaryFile() as temp_file:
             img.save(temp_file.name, format='png')
-            p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
-        imgp = Image.open(w)
-        #PIL palette data is glitched at this point, converting to RGBA fixes it, somehow.
-        imgrgba = imgp.convert('RGBA')
-        palette = np.reshape(imgp.getpalette('RGBA'), (-1, 4)).astype(np.uint8)
-        assert len(palette) <= colors
-        bitmap = np.asarray(imgp)
-        #Force the existence of RGBA PIL during this chunk of code (?)
-        del(imgrgba)
+            if self._use_shell:
+                p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
+            else:
+                p = subprocess.Popen([f"{self._app}", f"--quality=0-{self._max_quality}", f"--speed={self._speed}", f"--floyd={self._dithering_level}", f"{colors}", "-"], shell=False, stdout=w, stdin=temp_file, bufsize=0, stderr=subprocess.STDOUT).wait()
+        if 0 == p:
+            imgp = Image.open(w)
+            #PIL palette data is glitched at this point, converting to RGBA fixes it, somehow.
+            imgrgba = imgp.convert('RGBA')
+            palette = np.reshape(imgp.getpalette('RGBA'), (-1, 4)).astype(np.uint8)
+            assert len(palette) <= colors
+            bitmap = np.asarray(imgp)
+            #Force the existence of RGBA PIL during this chunk of code (?)
+            del(imgrgba)
+        else:
+            _logger.warning(f"pngquant reported error {p}.")
+            palette = bitmap = None
         w.close()
         return palette, bitmap
 
@@ -308,11 +374,14 @@ class PNGQuantWrapper:
 
         return_code = -127
         with open(in_tmp.name, 'rb') as inf:
-            p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
+            if self._use_shell:
+                p = subprocess.Popen(f"{self._app} --quality=0-{self._max_quality} --speed={self._speed} --floyd={self._dithering_level} {colors} -", shell=True, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
+            else:
+                p = subprocess.Popen([f"{self._app}", f"--quality=0-{self._max_quality}", f"--speed={self._speed}", f"--floyd={self._dithering_level}", f"{colors}", "-"], shell=False, stdin=inf, stdout=out_tmp, stderr=subprocess.DEVNULL, bufsize=0)
             p.communicate()
             if (return_code := p.returncode) != 0:
                 _logger.warning(f"pngquant reported error {return_code}.")
-        palette, bitmap = None, None
+        palette = bitmap = None
         if return_code == 0:
             imgp = Image.open(out_tmp)
             imgrgba = imgp.convert('RGBA')
@@ -405,6 +474,9 @@ class _LIQWrapper:
         self._max_colors = colors
         self._lib.liq_set_max_colors(self._attr, self._max_colors)
 
+    def get_default_max_colors(self) -> int:
+        return self._max_colors
+
     @__ensure_liq
     def quantize(self, img: Image.Image, colors: Optional[int] = None) -> tuple[npt.NDArray[np.uint8], npt.NDArray[np.uint8]]:
         if self._attr is None:
@@ -418,7 +490,6 @@ class _LIQWrapper:
             self._lib.liq_set_max_colors(self._attr, colors)
             assert self._lib.liq_get_max_colors(self._attr) == colors
 
-        img_array = np.ascontiguousarray(img, np.uint8)
         liq_img = self._lib.liq_image_create_rgba(self._attr, img.tobytes(), img.width, img.height, 0)
 
         liq_res = ctypes.c_void_p()
@@ -482,7 +553,7 @@ class _LIQWrapper:
         elif os.name == 'posix':
             #libimagequant dylib is acting odd on OSX, escape this function.
             if sys.platform.lower() == 'darwin':
-                _logger.debug(f"Evading library look-up, detected macOS.")
+                _logger.debug("Evading library look-up, detected macOS.")
                 return None
 
             retry_linux = False
@@ -607,6 +678,7 @@ class PILIQ:
                     _LIQWrapper.bind(cdl)
                 self._wrapped = _LIQWrapper()
             elif PNGQuantWrapper.is_ready():
+                PNGQuantWrapper.to_abs_exec()
                 _logger.debug("Detected pngquant, using that.")
                 self._wrapped = PNGQuantWrapper()
             # quantizr sometime returns garbage, consistently on some image. Do not ever use it by default.
