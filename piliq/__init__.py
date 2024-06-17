@@ -191,8 +191,8 @@ class _QuantizrWrapper:
             assert 0 < colors <= 256
             self._lib.quantizr_set_max_colors(self._attr, colors)
 
-        #input_img = np.ascontiguousarray(img, np.uint8).flatten().data.tobytes()
-        liq_img = self._lib.quantizr_create_image_rgba(img.tobytes(), int(img.width), int(img.height))
+        input_img = np.ascontiguousarray(img, np.uint8)
+        liq_img = self._lib.quantizr_create_image_rgba(input_img.ctypes.data_as(ctypes.POINTER(ctypes.c_char_p)), int(img.width), int(img.height))
         assert liq_img
 
         liq_res = self._lib.quantizr_quantize(liq_img, self._attr)
@@ -490,7 +490,8 @@ class _LIQWrapper:
             self._lib.liq_set_max_colors(self._attr, colors)
             assert self._lib.liq_get_max_colors(self._attr) == colors
 
-        liq_img = self._lib.liq_image_create_rgba(self._attr, img.tobytes(), img.width, img.height, 0)
+        img_array = np.ascontiguousarray(img, np.uint8)
+        liq_img = self._lib.liq_image_create_rgba(self._attr, img_array.ctypes.data_as(ctypes.POINTER(ctypes.c_void_p)), img.width, img.height, 0)
 
         liq_res = ctypes.c_void_p()
         retval = self._lib.liq_image_quantize(liq_img, self._attr, ctypes.pointer(liq_res))
